@@ -1,2 +1,1 @@
-# C-Simulation
-Just a little C++ Simulation in the works
+# C++ Black Hole Simulation
