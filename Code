@@ -1,0 +1,42 @@
+#include <cmath>
+#include <iostream>
+#include <glm/glm.hpp>
+
+// Simple ray marcher for a Schwarzschild black hole
+glm::vec3 traceRay(glm::vec3 pos, glm::vec3 dir) {
+    const int maxSteps = 1000;
+    const float dt = 0.05f;
+    const float rs = 1.0f; // Event horizon radius (scaled)
+
+    for (int i = 0; i < maxSteps; ++i) {
+        // Check if ray crosses the event horizon
+        float r2 = glm::dot(pos, pos);
+        if (r2 < rs * rs) {
+            return glm::vec3(0.0f); // Captured by black hole (black)
+        }
+
+        // Check if ray escaped far out into space (background stars)
+        if (r2 > 100.0f * 100.0f) {
+            return glm::vec3(0.8f, 0.9f, 1.0f); // Sky/star color
+        }
+
+        // Gravitational acceleration approximation for light bending
+        // a ~ -1.5 * rs * pos / r^5
+        float r = std::sqrt(r2);
+        glm::vec3 accel = -1.5f * rs * pos / (r2 * r2 * r);
+
+        dir += accel * dt;
+        dir = glm::normalize(dir);
+        pos += dir * dt;
+    }
+
+    return glm::vec3(0.0f);
+}
+
+int main() {
+    std::cout << "Black hole ray-tracing simulation initialized." << std::endl;
+    // Example ray starting at x = -10, y = 2, z = 0 heading right (1, 0, 0)
+    glm::vec3 color = traceRay(glm::vec3(-10.0f, 2.0f, 0.0f), glm::normalize(glm::vec3(1.0f, -0.1f, 0.0f)));
+    std::cout << "Resulting pixel color: (" << color.r << ", " << color.g << ", " << color.b << ")\n";
+    return 0;
+}
