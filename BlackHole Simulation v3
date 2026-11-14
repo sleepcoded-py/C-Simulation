@@ -1,0 +1,202 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+
+struct Vec3 {
+    double x, y, z;
+    Vec3 operator+(const Vec3& b) const { return {x + b.x, y + b.y, z + b.z}; }
+    Vec3 operator-(const Vec3& b) const { return {x - b.x, y - b.y, z - b.z}; }
+    Vec3 operator*(double s) const { return {x * s, y * s, z * s}; }
+    double dot(const Vec3& b) const { return x * b.x + y * b.y + z * b.z; }
+    Vec3 cross(const Vec3& b) const {
+        return {y * b.z - z * b.y, z * b.x - x * b.z, x * b.y - y * b.x};
+    }
+    double length() const { return std::sqrt(x * x + y * y + z * z); }
+    Vec3 normalize() const {
+        double l = length();
+        return l > 0 ? Vec3{x / l, y / l, z / l} : Vec3{0, 0, 0};
+    }
+};
+
+struct Color {
+    double r, g, b;
+    Color operator+(const Color& c) const { return {r + c.r, g + c.g, b + c.b}; }
+    Color operator*(double s) const { return {r * s, g * s, b * s}; }
+};
+
+// State for RK4 geodesic integration in the orbital plane: u = 1/r, du = du/dphi
+struct GeodesicState {
+    double u;
+    double du;
+};
+
+// Exact Schwarzschild null geodesic equation: d^2u / dphi^2 = 1.5 * rs * u^2 - u
+GeodesicState geodesicDeriv(const GeodesicState& s, double rs) {
+    return { s.du, 1.5 * rs * s.u * s.u - s.u };
+}
+
+GeodesicState rk4Step(const GeodesicState& s, double dphi, double rs) {
+    GeodesicState k1 = geodesicDeriv(s, rs);
+    GeodesicState k2 = geodesicDeriv({s.u + 0.5 * dphi * k1.u, s.du + 0.5 * dphi * k1.du}, rs);
+    GeodesicState k3 = geodesicDeriv({s.u + 0.5 * dphi * k2.u, s.du + 0.5 * dphi * k2.du}, rs);
+    GeodesicState k4 = geodesicDeriv({s.u + dphi * k3.u, s.du + dphi * k3.du}, rs);
+
+    return {
+        s.u + (dphi / 6.0) * (k1.u + 2.0 * k2.u + 2.0 * k3.u + k4.u),
+        s.du + (dphi / 6.0) * (k1.du + 2.0 * k2.du + 2.0 * k3.du + k4.du)
+    };
+}
+
+// Procedural starfield background based on final escaped ray direction
+Color sampleBackground(const Vec3& dir) {
+    double gridX = std::sin(dir.x * 45.0) * std::cos(dir.y * 45.0) * std::sin(dir.z * 45.0);
+    if (gridX > 0.96) {
+        double intensity = (gridX - 0.96) * 25.0;
+        return {intensity, intensity * 0.95, intensity * 1.1};
+    }
+    // Faint cosmic dust gradient
+    double band = std::exp(-std::abs(dir.y + 0.2 * dir.x) * 6.0) * 0.08;
+    return {band * 0.6, band * 0.7, band * 1.2};
+}
+
+// Procedural accretion disk texture with relativistic Doppler beaming approximation
+Color sampleDisk(const Vec3& pos, const Vec3& rayDir, double innerR, double outerR) {
+    double r = std::sqrt(pos.x * pos.x + pos.z * pos.z);
+    double t = (r - innerR) / (outerR - innerR);
+    double angle = std::atan2(pos.z, pos.x);
+
+    // Spiral plasma rings
+    double rings = 0.6 + 0.4 * std::sin(r * 3.5 + angle * 2.0);
+    double fade = std::sin(t * 3.14159265); // Smooth inner/outer edge fade
+
+    // Orbital velocity direction (counter-clockwise in XZ plane)
+    Vec3 tangent = Vec3{-pos.z, 0.0, pos.x}.normalize();
+    double doppler = 1.0 - 0.45 * tangent.dot(rayDir); // Brighter on approaching side
+
+    double intensity = rings * fade * doppler * 1.8;
+    return {
+        intensity * 1.0,
+        intensity * (0.55 - 0.25 * t),
+        intensity * (0.20 - 0.15 * t)
+    };
+}
+
+Color traceRay(Vec3 camPos, Vec3 rayDir, double rs) {
+    // Define the 2D orbital plane of the photon using position and initial direction
+    Vec3 normal = camPos.cross(rayDir);
+    if (normal.length() < 1e-6) {
+        // Ray points straight at or away from the black hole center
+        return (camPos.dot(rayDir) < 0) ? Color{0, 0, 0} : sampleBackground(rayDir);
+    }
+    normal = normal.normalize();
+
+    Vec3 e1 = camPos.normalize();               // Basis vector along initial radius (phi = 0)
+    Vec3 e2 = normal.cross(e1).normalize();     // Basis vector perpendicular in orbital plane
+
+    double r0 = camPos.length();
+    double cosAlpha = e1.dot(rayDir);
+    double sinAlpha = e2.dot(rayDir);
+
+    // Initial conditions: u = 1/r, du/dphi = -(1/r) * cot(alpha)
+    GeodesicState state = { 1.0 / r0, -(1.0 / r0) * (cosAlpha / sinAlpha) };
+
+    double phi = 0.0;
+    double dphi = 0.015;
+    double innerDisk = 2.6 * rs; // Innermost Stable Circular Orbit (ISCO) is 3*rs
+    double outerDisk = 8.5 * rs;
+
+    Vec3 prevPos = camPos;
+    Color accumColor = {0, 0, 0};
+    double alphaAccum = 0.0;
+
+    for (int step = 0; step < 1200; ++step) {
+        state = rk4Step(state, dphi, rs);
+        phi += dphi;
+
+        // Escaped to infinity
+        if (state.u <= 0.0) {
+            Vec3 finalDir = (e1 * std::cos(phi) + e2 * std::sin(phi)).normalize();
+            Color bg = sampleBackground(finalDir);
+            return accumColor + bg * (1.0 - alphaAccum);
+        }
+
+        double r = 1.0 / state.u;
+
+        // Crossed Event Horizon
+        if (r <= rs) {
+            return accumColor;
+        }
+
+        Vec3 currPos = (e1 * std::cos(phi) + e2 * std::sin(phi)) * r;
+
+        // Check if ray crossed the equatorial accretion disk (Y = 0 plane)
+        if ((prevPos.y > 0.0 && currPos.y <= 0.0) || (prevPos.y < 0.0 && currPos.y >= 0.0)) {
+            double frac = std::abs(prevPos.y) / (std::abs(prevPos.y) + std::abs(currPos.y));
+            Vec3 hitPos = prevPos + (currPos - prevPos) * frac;
+            double hitR = std::sqrt(hitPos.x * hitPos.x + hitPos.z * hitPos.z);
+
+            if (hitR >= innerDisk && hitR <= outerDisk) {
+                Vec3 localDir = (currPos - prevPos).normalize();
+                Color diskCol = sampleDisk(hitPos, localDir, innerDisk, outerDisk);
+                double opacity = 0.85;
+                accumColor = accumColor + diskCol * (opacity * (1.0 - alphaAccum));
+                alphaAccum += opacity * (1.0 - alphaAccum);
+                if (alphaAccum > 0.98) return accumColor;
+            }
+        }
+
+        prevPos = currPos;
+    }
+
+    return accumColor;
+}
+
+int main() {
+    const int width = 800;
+    const int height = 450;
+    const double rs = 1.0; // Schwarzschild radius
+
+    // Camera setup tilted slightly above the accretion disk plane
+    Vec3 camPos = {0.0, 2.2, -16.0};
+    Vec3 lookAt = {0.0, 0.0, 0.0};
+    Vec3 up = {0.0, 1.0, 0.0};
+
+    Vec3 forward = (lookAt - camPos).normalize();
+    Vec3 right = up.cross(forward).normalize();
+    Vec3 camUp = forward.cross(right).normalize();
+
+    double fov = 0.85;
+    double aspect = static_cast<double>(width) / height;
+
+    std::ofstream out("black_hole_v3.ppm");
+    out << "P3\n" << width << " " << height << "\n255\n";
+
+    std::cout << "Rendering " << width << "x" << height << " relativistic black hole...\n";
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            double u = (2.0 * (x + 0.5) / width - 1.0) * aspect * fov;
+            double v = (1.0 - 2.0 * (y + 0.5) / height) * fov;
+
+            Vec3 rayDir = (forward + right * u + camUp * v).normalize();
+            Color col = traceRay(camPos, rayDir, rs);
+
+            // Simple Reinhard tone mapping and gamma correction
+            col.r = std::pow(col.r / (1.0 + col.r), 1.0 / 2.2);
+            col.g = std::pow(col.g / (1.0 + col.g), 1.0 / 2.2);
+            col.b = std::pow(col.b / (1.0 + col.b), 1.0 / 2.2);
+
+            int ir = static_cast<int>(std::clamp(col.r * 255.0, 0.0, 255.0));
+            int ig = static_cast<int>(std::clamp(col.g * 255.0, 0.0, 255.0));
+            int ib = static_cast<int>(std::clamp(col.b * 255.0, 0.0, 255.0));
+
+            out << ir << " " << ig << " " << ib << "\n";
+        }
+    }
+
+    out.close();
+    std::cout << "Saved render to black_hole_v3.ppm\n";
+    return 0;
+}
