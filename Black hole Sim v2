@@ -1,0 +1,65 @@
+#include <iostream>
+#include <cmath>
+#include <vector>
+
+struct Vector2D {
+    double x, y;
+};
+
+struct LightRay {
+    Vector2D pos;
+    Vector2D vel;
+    bool active = true;
+};
+
+// Simple 2D approximation of deflection around a point mass
+// For strict General Relativity, you integrate null geodesics using the Schwarzschild metric.
+void stepRay(LightRay& ray, const Vector2D& bhPos, double rs, double dt) {
+    // Vector from black hole to ray
+    double dx = ray.pos.x - bhPos.x;
+    double dy = ray.pos.y - bhPos.y;
+    double r2 = dx*dx + dy*dy;
+    double r = std::sqrt(r2);
+
+    // Stop if ray hits the event horizon
+    if (r <= rs) {
+        ray.active = false;
+        return;
+    }
+
+    // Gravitational acceleration approximation (Newtonian-relativistic hybrid for 2D visual test)
+    // For true Schwarzschild lensing, use polar/geodesic equations (d2r, d2phi)
+    double accelFactor = -1.5 * rs * (1.0 / (r2 * r)); // enhanced bending factor
+    double ax = accelFactor * dx;
+    double ay = accelFactor * dy;
+
+    // Update velocity and position (Euler integration)
+    ray.vel.x += ax * dt;
+    ray.vel.y += ay * dt;
+
+    ray.pos.x += ray.vel.x * dt;
+    ray.pos.y += ray.vel.y * dt;
+}
+
+int main() {
+    Vector2D blackHole = {0.0, 0.0};
+    double schwarzschildRadius = 1.5;
+    double dt = 0.05;
+
+    // Create a horizontal stream of light rays
+    std::vector<LightRay> rays;
+    for (double y = -10.0; y <= 10.0; y += 2.0) {
+        rays.push_back({{ -20.0, y }, { 1.0, 0.0 }, true});
+    }
+
+    for (int step = 0; step < 400; ++step) {
+        for (auto& ray : rays) {
+            if (ray.active) {
+                stepRay(ray, blackHole, schwarzschildRadius, dt);
+            }
+        }
+    }
+
+    std::cout << "Simulation completed for " << rays.size() << " rays.\n";
+    return 0;
+}
